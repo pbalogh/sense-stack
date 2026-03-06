@@ -4,6 +4,4 @@ __pycache__/
 dist/
 build/
 .eggs/
-*.pt
-!sense_stack/models/.gitkeep
 .venv/
