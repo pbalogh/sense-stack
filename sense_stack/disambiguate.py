@@ -115,7 +115,7 @@ def _extract_embedding(sentence, word, model_name, device):
     tokens = tokenizer.convert_ids_to_tokens(input_ids)
     word_lower = word.lower()
 
-    # Find token(s) matching the word
+    # Strategy 1: exact match
     target_idx = None
     for i, token in enumerate(tokens):
         clean = token.replace('##', '').replace('Ġ', '').replace('▁', '').lower()
@@ -123,13 +123,40 @@ def _extract_embedding(sentence, word, model_name, device):
             target_idx = i
             break
 
-    # Fallback: partial match
+    # Strategy 2: word appears as prefix of token (handles inflections: plant → planted)
+    if target_idx is None:
+        for i, token in enumerate(tokens):
+            clean = token.replace('##', '').replace('Ġ', '').replace('▁', '').lower()
+            if clean.startswith(word_lower) and len(clean) >= len(word_lower):
+                target_idx = i
+                break
+
+    # Strategy 3: token appears as prefix of word (subword tokenization)
     if target_idx is None:
         for i, token in enumerate(tokens):
             clean = token.replace('##', '').replace('Ġ', '').replace('▁', '').lower()
             if word_lower.startswith(clean) and len(clean) > 1:
                 target_idx = i
                 break
+
+    # Strategy 4: find word in original text, map to token position
+    if target_idx is None:
+        import re
+        match = re.search(rf'(?<![a-zA-Z]){re.escape(word)}', sentence, re.IGNORECASE)
+        if match:
+            char_idx = match.start()
+            # Use offset mapping if available
+            try:
+                inputs_with_offsets = tokenizer(sentence, return_tensors='pt',
+                                                return_offsets_mapping=True,
+                                                truncation=True, max_length=128)
+                offsets = inputs_with_offsets['offset_mapping'][0]
+                for i, (start, end) in enumerate(offsets):
+                    if start <= char_idx < end:
+                        target_idx = i
+                        break
+            except Exception:
+                pass
 
     if target_idx is None:
         raise ValueError(f"Could not find '{word}' in tokenized sentence: {tokens}")
@@ -144,7 +171,13 @@ def _extract_embedding(sentence, word, model_name, device):
 def _get_mlp_classifier(word, model_name):
     """Load a trained MLP classifier for a word."""
     import torch
+    import sys
     from pathlib import Path
+    from sense_stack.train import SenseClassifierMLP
+
+    # Register the class so torch.load can find it
+    if 'sense_stack.train' not in sys.modules:
+        import sense_stack.train
 
     key = (word, model_name)
     if key not in _mlp_models:
@@ -157,6 +190,10 @@ def _get_mlp_classifier(word, model_name):
                 f"Expected at {model_file}. "
                 f"Run `python -m sense_stack.train --word {word}` to train one."
             )
+
+        # Add the class to __main__ so unpickling works
+        import __main__
+        __main__.SenseClassifierMLP = SenseClassifierMLP
 
         checkpoint = torch.load(model_file, map_location='cpu', weights_only=False)
         _mlp_models[key] = checkpoint
